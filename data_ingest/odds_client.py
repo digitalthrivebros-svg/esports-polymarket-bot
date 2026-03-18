@@ -41,6 +41,9 @@ class OddsClient:
         data = self._get("/tournaments", params={"sportId": sport_id})
         return data if isinstance(data, list) else []
 
+    # Max tournament IDs per request to avoid 400 errors from overly long URLs
+    BATCH_SIZE = 20
+
     def get_pinnacle_odds(
         self,
         tournament_ids: list[int | str],
@@ -48,22 +51,33 @@ class OddsClient:
     ) -> list[dict[str, Any]]:
         """Fetch Pinnacle odds for the given tournaments.
 
+        Automatically batches large lists to stay within API URL limits.
+
         Args:
             tournament_ids: List of tournament IDs to query.
             odds_format: 'decimal' or 'american'.
         """
         if not tournament_ids:
             return []
-        ids_str = ",".join(str(t) for t in tournament_ids)
-        data = self._get(
-            "/odds-by-tournaments",
-            params={
-                "bookmaker": "pinnacle",
-                "tournamentIds": ids_str,
-                "oddsFormat": odds_format,
-            },
-        )
-        return data if isinstance(data, list) else []
+
+        all_odds: list[dict[str, Any]] = []
+        for i in range(0, len(tournament_ids), self.BATCH_SIZE):
+            batch = tournament_ids[i : i + self.BATCH_SIZE]
+            ids_str = ",".join(str(t) for t in batch)
+            data = self._get(
+                "/odds-by-tournaments",
+                params={
+                    "bookmaker": "pinnacle",
+                    "tournamentIds": ids_str,
+                    "oddsFormat": odds_format,
+                },
+            )
+            if isinstance(data, list):
+                all_odds.extend(data)
+            # Courtesy delay between batches to avoid rate limits
+            if i + self.BATCH_SIZE < len(tournament_ids):
+                time.sleep(2)
+        return all_odds
 
     def get_all_esports_odds(self) -> dict[str, list[dict[str, Any]]]:
         """Convenience method: fetch Pinnacle odds across every esport title.
