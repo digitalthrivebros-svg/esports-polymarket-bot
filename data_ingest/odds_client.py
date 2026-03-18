@@ -1,6 +1,7 @@
 """OddsPapi client — fetches Pinnacle odds for all esports titles."""
 
 import logging
+import time
 from typing import Any
 
 import requests
@@ -77,11 +78,13 @@ class OddsClient:
             if not tournaments:
                 logger.info("No active tournaments for %s (sport_id=%d)", game, sport_id)
                 results[game] = []
+                time.sleep(2)  # Rate-limit courtesy delay
                 continue
 
             tournament_ids = [t.get("id") or t.get("tournamentId") for t in tournaments]
             tournament_ids = [t for t in tournament_ids if t is not None]
 
+            time.sleep(2)  # Rate-limit courtesy delay
             odds = self.get_pinnacle_odds(tournament_ids)
             results[game] = odds
             logger.info(

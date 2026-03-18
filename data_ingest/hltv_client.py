@@ -46,28 +46,45 @@ class HLTVClient:
         """Fetch upcoming CS2 matches within the next *days* days."""
         hltv = self._ensure_client()
         try:
-            matches = await hltv.get_upcoming_matches(days=days)
+            matches = await hltv.get_matches(
+                days=days, min_rating=1, live=True, future=True
+            )
             logger.info("Fetched %d upcoming CS2 matches", len(matches) if matches else 0)
             return matches if isinstance(matches, list) else []
         except Exception:
             logger.exception("Failed to fetch HLTV upcoming matches")
             return []
 
-    async def get_match_info(self, match_id: int | str) -> dict[str, Any] | None:
+    async def get_match_info(
+        self,
+        match_id: int | str,
+        team1: str = "",
+        team2: str = "",
+        event_title: str = "",
+    ) -> dict[str, Any] | None:
         """Fetch detailed information for a specific match."""
         hltv = self._ensure_client()
         try:
-            info = await hltv.get_match_info(match_id)
+            info = await hltv.get_match_info(
+                id=match_id,
+                team1=team1,
+                team2=team2,
+                event_title=event_title,
+                stats=True,
+                predicts=True,
+            )
             return info if isinstance(info, dict) else None
         except Exception:
             logger.exception("Failed to fetch HLTV match info for %s", match_id)
             return None
 
-    async def get_team_info(self, team_id: int | str) -> dict[str, Any] | None:
+    async def get_team_info(
+        self, team_id: int | str, title: str = ""
+    ) -> dict[str, Any] | None:
         """Fetch team details: roster, recent results, map pool."""
         hltv = self._ensure_client()
         try:
-            info = await hltv.get_team_info(team_id)
+            info = await hltv.get_team_info(team_id=team_id, title=title)
             return info if isinstance(info, dict) else None
         except Exception:
             logger.exception("Failed to fetch HLTV team info for %s", team_id)
