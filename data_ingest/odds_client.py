@@ -26,6 +26,9 @@ class OddsClient:
         params["apiKey"] = self.api_key
         try:
             resp = self.session.get(url, params=params, timeout=REQUEST_TIMEOUT)
+            if resp.status_code == 404:
+                # No fixtures found — not an error, just empty
+                return []
             resp.raise_for_status()
             return resp.json()
         except requests.RequestException:
@@ -41,8 +44,8 @@ class OddsClient:
         data = self._get("/tournaments", params={"sportId": sport_id})
         return data if isinstance(data, list) else []
 
-    # Max tournament IDs per request to avoid 400 errors from overly long URLs
-    BATCH_SIZE = 20
+    # OddsPapi allows max 5 tournament IDs per request
+    BATCH_SIZE = 5
 
     def get_pinnacle_odds(
         self,
