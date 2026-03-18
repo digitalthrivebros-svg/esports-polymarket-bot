@@ -1,6 +1,7 @@
 """PandaScore API wrapper — schedules, rosters, and stats across multiple esports."""
 
 import logging
+from datetime import datetime, timedelta
 from typing import Any
 
 import requests
@@ -71,6 +72,22 @@ class PandaScoreClient:
         data = self._get(f"/{game}/tournaments", params={"per_page": per_page})
         return data if isinstance(data, list) else []
 
+    def get_past_matches(self, game: str, days_back: int = 3, per_page: int = 50) -> list[dict[str, Any]]:
+        """Completed matches for a game within the last N days.
+
+        Returns matches with ``winner`` object containing ``id`` and ``name``,
+        plus ``opponents`` array.
+        """
+        end = datetime.utcnow()
+        start = end - timedelta(days=days_back)
+        params = {
+            "per_page": per_page,
+            "filter[status]": "finished",
+            "range[end_at]": f"{start.strftime('%Y-%m-%dT00:00:00Z')},{end.strftime('%Y-%m-%dT23:59:59Z')}",
+        }
+        data = self._get(f"/{game}/matches/past", params=params)
+        return data if isinstance(data, list) else []
+
     # ------------------------------------------------------------------
     # Cross-game convenience
     # ------------------------------------------------------------------
@@ -81,4 +98,12 @@ class PandaScoreClient:
         for game in GAME_SLUGS:
             results[game] = self.get_upcoming_matches(game)
             logger.info("PandaScore: %d upcoming %s matches", len(results[game]), game)
+        return results
+
+    def get_all_past_matches(self, days_back: int = 3) -> dict[str, list[dict[str, Any]]]:
+        """Return past matches for every supported game, keyed by slug."""
+        results: dict[str, list[dict[str, Any]]] = {}
+        for game in GAME_SLUGS:
+            results[game] = self.get_past_matches(game, days_back=days_back)
+            logger.info("PandaScore: %d past %s matches (last %d days)", len(results[game]), game, days_back)
         return results

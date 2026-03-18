@@ -44,17 +44,21 @@ def init_db() -> None:
             );
 
             CREATE TABLE IF NOT EXISTS trades (
-                trade_id   INTEGER PRIMARY KEY AUTOINCREMENT,
-                signal_id  INTEGER,
-                token_id   TEXT NOT NULL,
-                side       TEXT NOT NULL,
-                price      REAL NOT NULL,
-                size       REAL NOT NULL,
-                order_id   TEXT,
-                status     TEXT DEFAULT 'pending',
-                fill_price REAL,
-                pnl        REAL,
-                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                trade_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id        INTEGER,
+                token_id         TEXT NOT NULL,
+                side             TEXT NOT NULL,
+                price            REAL NOT NULL,
+                size             REAL NOT NULL,
+                order_id         TEXT,
+                status           TEXT DEFAULT 'pending',
+                fill_price       REAL,
+                settlement_price REAL,
+                pnl              REAL,
+                match_id         TEXT,
+                teams            TEXT,
+                team_backed      TEXT,
+                created_at       TEXT NOT NULL DEFAULT (datetime('now')),
                 FOREIGN KEY (signal_id) REFERENCES signals(signal_id)
             );
 
@@ -68,9 +72,25 @@ def init_db() -> None:
             """
         )
         conn.commit()
+
+        # Migrate existing tables: add columns that may not exist yet
+        _migrate_add_column(conn, "trades", "settlement_price", "REAL")
+        _migrate_add_column(conn, "trades", "match_id", "TEXT")
+        _migrate_add_column(conn, "trades", "teams", "TEXT")
+        _migrate_add_column(conn, "trades", "team_backed", "TEXT")
+
         logger.info("Database initialized at %s", DB_PATH)
     finally:
         conn.close()
+
+
+def _migrate_add_column(conn: sqlite3.Connection, table: str, column: str, col_type: str) -> None:
+    """Add a column to a table if it doesn't already exist."""
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # Column already exists
 
 
 def log_signal(
@@ -102,14 +122,17 @@ def log_trade(
     size: float,
     order_id: str = "",
     status: str = "pending",
+    match_id: str = "",
+    teams: str = "",
+    team_backed: str = "",
 ) -> int:
     """Record a trade and return its ID."""
     conn = _connect()
     try:
         cur = conn.execute(
-            "INSERT INTO trades (signal_id, token_id, side, price, size, order_id, status) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (signal_id, token_id, side, price, size, order_id, status),
+            "INSERT INTO trades (signal_id, token_id, side, price, size, order_id, status, match_id, teams, team_backed) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (signal_id, token_id, side, price, size, order_id, status, match_id, teams, team_backed),
         )
         conn.commit()
         return cur.lastrowid  # type: ignore[return-value]
@@ -202,5 +225,77 @@ def update_daily_pnl(
             (day.isoformat(), realized_pnl, unrealized_pnl, num_trades, win_rate),
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def get_unsettled_trades() -> list[dict[str, Any]]:
+    """Return all trades with status 'open' or 'filled' (awaiting settlement)."""
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM trades WHERE status IN ('open', 'filled', 'pending') ORDER BY created_at DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_trade_history(days: int = 30) -> list[dict[str, Any]]:
+    """Return all settled trades with P&L from the last N days."""
+    conn = _connect()
+    try:
+        cutoff = datetime.now().isoformat()[:10]  # today
+        rows = conn.execute(
+            "SELECT * FROM trades WHERE status IN ('won', 'lost', 'settled') "
+            "AND created_at >= date(?, '-' || ? || ' days') "
+            "ORDER BY created_at DESC",
+            (cutoff, days),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_performance_summary() -> dict[str, Any]:
+    """Return all-time performance stats: total P&L, win rate, ROI, avg edge, num trades, best/worst trade."""
+    conn = _connect()
+    try:
+        row = conn.execute(
+            """
+            SELECT
+                COUNT(*) as num_trades,
+                COALESCE(SUM(pnl), 0) as total_pnl,
+                COALESCE(SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END), 0) as wins,
+                COALESCE(SUM(size), 0) as total_wagered,
+                COALESCE(MAX(pnl), 0) as best_trade,
+                COALESCE(MIN(pnl), 0) as worst_trade
+            FROM trades
+            WHERE status IN ('won', 'lost', 'settled')
+            """
+        ).fetchone()
+
+        if not row or row["num_trades"] == 0:
+            return {
+                "num_trades": 0, "total_pnl": 0.0, "win_rate": 0.0,
+                "roi": 0.0, "avg_edge": 0.0, "best_trade": 0.0, "worst_trade": 0.0,
+            }
+
+        d = dict(row)
+        d["win_rate"] = d["wins"] / d["num_trades"] if d["num_trades"] else 0.0
+        d["roi"] = d["total_pnl"] / d["total_wagered"] if d["total_wagered"] else 0.0
+
+        # Avg edge from signals linked to settled trades
+        edge_row = conn.execute(
+            """
+            SELECT COALESCE(AVG(s.edge), 0) as avg_edge
+            FROM trades t
+            JOIN signals s ON t.signal_id = s.signal_id
+            WHERE t.status IN ('won', 'lost', 'settled')
+            """
+        ).fetchone()
+        d["avg_edge"] = edge_row["avg_edge"] if edge_row else 0.0
+
+        return d
     finally:
         conn.close()

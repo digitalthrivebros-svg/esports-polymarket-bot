@@ -32,8 +32,14 @@ RISK_MAX_MATCHES_CONCURRENT: int = int(_get_env("RISK_MAX_MATCHES_CONCURRENT", "
 # --- Execution ---
 DRY_RUN: bool = _get_env("DRY_RUN", "true").lower() in ("true", "1", "yes")
 
+# --- Paper trading ---
+PAPER_BANKROLL: float = float(_get_env("PAPER_BANKROLL", "1000.0"))
+
 # --- Scheduler ---
-SCAN_INTERVAL_SECONDS: int = int(_get_env("SCAN_INTERVAL_SECONDS", "300"))
+SCAN_INTERVAL_SECONDS: int = int(_get_env("SCAN_INTERVAL_SECONDS", "600"))
+
+# --- Caching ---
+TOURNAMENT_CACHE_TTL: int = int(_get_env("TOURNAMENT_CACHE_TTL", "3600"))
 
 # --- Database ---
 DB_PATH: str = _get_env("DB_PATH", "bot.db")
