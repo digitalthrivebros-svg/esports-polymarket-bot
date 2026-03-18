@@ -83,7 +83,8 @@ class OddsClient:
         """Convenience method: fetch Pinnacle odds across every esport title.
 
         Returns a dict keyed by game name (cs2, lol, …) with the odds list
-        as value.
+        as value.  Only queries tournaments that have upcoming or live
+        fixtures to avoid 400 errors from the API.
         """
         results: dict[str, list[dict[str, Any]]] = {}
 
@@ -95,15 +96,34 @@ class OddsClient:
                 time.sleep(2)  # Rate-limit courtesy delay
                 continue
 
-            tournament_ids = [t.get("id") or t.get("tournamentId") for t in tournaments]
+            # Only keep tournaments with upcoming or live fixtures
+            active_tournaments = [
+                t for t in tournaments
+                if (t.get("upcomingFixtures", 0) or 0) > 0
+                or (t.get("liveFixtures", 0) or 0) > 0
+            ]
+
+            tournament_ids = [
+                t.get("tournamentId") or t.get("id")
+                for t in active_tournaments
+            ]
             tournament_ids = [t for t in tournament_ids if t is not None]
+
+            if not tournament_ids:
+                logger.info(
+                    "No active fixtures for %s (%d tournaments, 0 with upcoming/live)",
+                    game, len(tournaments),
+                )
+                results[game] = []
+                time.sleep(2)
+                continue
 
             time.sleep(2)  # Rate-limit courtesy delay
             odds = self.get_pinnacle_odds(tournament_ids)
             results[game] = odds
             logger.info(
-                "Fetched %d Pinnacle odds for %s across %d tournaments",
-                len(odds), game, len(tournament_ids),
+                "Fetched %d Pinnacle odds for %s across %d active tournaments (of %d total)",
+                len(odds), game, len(tournament_ids), len(tournaments),
             )
 
         return results
