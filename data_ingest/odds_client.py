@@ -12,8 +12,8 @@ logger = logging.getLogger(__name__)
 
 REQUEST_TIMEOUT = 15
 
-# Retry delays for 429 responses (exponential backoff)
-RETRY_DELAYS = [30, 60, 120]
+# Retry delays for 429 responses (quick backoff — don't block the whole cycle)
+RETRY_DELAYS = [5, 15]
 
 
 class OddsClient:
@@ -24,11 +24,17 @@ class OddsClient:
         self.session = requests.Session()
         # In-memory tournament cache: {sport_id: (timestamp, data)}
         self._tournament_cache: dict[int, tuple[float, list[dict[str, Any]]]] = {}
+        # When set, skip all API calls until this timestamp
+        self._rate_limited_until: float = 0.0
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         url = f"{ODDSPAPI_BASE}{path}"
         params = params or {}
         params["apiKey"] = self.api_key
+
+        # If globally rate-limited, skip immediately
+        if time.time() < self._rate_limited_until:
+            return None
 
         for attempt in range(len(RETRY_DELAYS) + 1):
             try:
@@ -45,9 +51,15 @@ class OddsClient:
                         time.sleep(delay)
                         continue
                     else:
-                        logger.error("Rate limited (429) on %s — all retries exhausted", path)
+                        # Skip all OddsPapi calls for 10 minutes
+                        self._rate_limited_until = time.time() + 600
+                        logger.warning(
+                            "OddsPapi rate limit hit — skipping all calls for 10 minutes"
+                        )
                         return None
                 resp.raise_for_status()
+                # Clear rate limit flag on success
+                self._rate_limited_until = 0.0
                 return resp.json()
             except requests.RequestException:
                 logger.exception("OddsPapi request failed: %s", path)
