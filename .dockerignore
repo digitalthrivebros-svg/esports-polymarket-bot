@@ -1,0 +1,10 @@
+.git
+.env
+__pycache__
+*.pyc
+.pytest_cache
+bot.db
+data/
+.claude/
+*.md
+!README.md
