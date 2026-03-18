@@ -57,7 +57,7 @@ echo "[2/5] Cloning repository…"
 if [ -d "$INSTALL_DIR" ]; then
     echo "  Directory exists — pulling latest…"
     cd "$INSTALL_DIR"
-    git pull origin master || git pull origin main || true
+    git pull origin main || git pull origin master || true
 else
     git clone "$REPO" "$INSTALL_DIR"
     cd "$INSTALL_DIR"
