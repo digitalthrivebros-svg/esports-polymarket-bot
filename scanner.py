@@ -1,16 +1,40 @@
 """Module 1: Discover open esports markets on Polymarket via Gamma + CLOB APIs."""
 
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any
 
 import requests
 
-from config import GAMMA_API_BASE, CLOB_API_BASE, GAMMA_SPORT_IDS
+from config import GAMMA_API_BASE, CLOB_API_BASE
 
 logger = logging.getLogger(__name__)
 
 REQUEST_TIMEOUT = 15
+
+# Gamma API tag_ids for each esports game (from /sports endpoint)
+# These are the CORRECT way to query esports events — NOT the `tag` parameter.
+GAME_TAG_IDS: dict[str, str] = {
+    "cs2": "100780",
+    "dota2": "102366",
+    "lol": "65",
+    "valorant": "101672",
+    "mlbb": "102750",
+    "overwatch": "102753",
+    "codmw": "100230",
+    "pubg": "102754",
+    "r6siege": "102755",
+    "rl": "102756",
+    "wildrift": "102752",
+    "sc2": "102758",
+}
+
+# Only scan the main esports titles by default
+DEFAULT_GAMES = ["cs2", "dota2", "lol", "valorant"]
+
+# Generic outcomes to exclude from team name extraction
+_GENERIC_OUTCOMES = frozenset({"Yes", "No", "Over", "Under", "Odd", "Even"})
 
 
 @dataclass
@@ -79,13 +103,14 @@ class PolymarketScanner:
         data = self._gamma_get("/sports/teams")
         return data if isinstance(data, list) else []
 
-    def get_events(self, sport_tag: str | None = None) -> list[dict[str, Any]]:
-        """GET /events — optionally filtered by sport tag slug."""
-        params: dict[str, Any] = {"active": "true"}
-        if sport_tag:
-            params["tag"] = sport_tag
-        else:
-            params["tag"] = "esports"
+    def get_events_by_tag_id(self, tag_id: str, limit: int = 200) -> list[dict[str, Any]]:
+        """GET /events filtered by tag_id — the correct way to fetch esports events."""
+        params: dict[str, Any] = {
+            "active": "true",
+            "closed": "false",
+            "limit": str(limit),
+            "tag_id": tag_id,
+        }
         data = self._gamma_get("/events", params=params)
         return data if isinstance(data, list) else []
 
@@ -148,28 +173,67 @@ class PolymarketScanner:
     # High-level scanning
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _parse_json_field(raw: Any) -> list:
+        """Safely parse a JSON string field into a list."""
+        if isinstance(raw, list):
+            return raw
+        if isinstance(raw, str):
+            try:
+                parsed = json.loads(raw)
+                return parsed if isinstance(parsed, list) else []
+            except (json.JSONDecodeError, TypeError):
+                return []
+        return []
+
+    @staticmethod
+    def _is_resolved(prices: list) -> bool:
+        """Check if a market is resolved (one outcome at ~1, other at ~0)."""
+        if len(prices) != 2:
+            return False
+        try:
+            p = sorted([float(x) for x in prices])
+            return p[0] < 0.01 and p[1] > 0.99
+        except (ValueError, TypeError):
+            return False
+
     def _parse_market(self, event: dict[str, Any], market: dict[str, Any], game: str) -> EsportsMarket | None:
-        """Convert a raw Gamma market dict into an EsportsMarket."""
+        """Convert a raw Gamma market dict into an EsportsMarket.
+
+        The Gamma API returns markets with:
+        - clobTokenIds: JSON string like '["tokenA...", "tokenB..."]'
+        - outcomes: JSON string like '["Team A", "Team B"]'
+        - outcomePrices: JSON string like '["0.65", "0.35"]'
+        """
         condition_id = market.get("conditionId") or market.get("condition_id", "")
         if not condition_id:
             return None
 
-        tokens: dict[str, str] = {}
-        for token in market.get("tokens", []):
-            outcome = token.get("outcome", "")
-            tid = token.get("token_id", "")
-            if outcome and tid:
-                tokens[outcome] = tid
+        # Parse JSON string fields from Gamma API
+        clob_token_ids = self._parse_json_field(market.get("clobTokenIds"))
+        outcomes_list = self._parse_json_field(market.get("outcomes"))
+        prices = self._parse_json_field(market.get("outcomePrices"))
 
-        teams: list[str] = []
-        for token in market.get("tokens", []):
-            outcome = token.get("outcome", "")
-            if outcome and outcome not in ("Yes", "No", "Over", "Under"):
-                teams.append(outcome)
+        # Skip markets with no token IDs
+        if not clob_token_ids:
+            return None
+
+        # Skip resolved markets
+        if self._is_resolved(prices):
+            return None
+
+        # Build outcome -> token_id mapping
+        tokens: dict[str, str] = {}
+        for i, tid in enumerate(clob_token_ids):
+            outcome = outcomes_list[i] if i < len(outcomes_list) else f"outcome_{i}"
+            tokens[outcome] = tid
+
+        # Extract team names (outcomes that aren't generic)
+        teams = [o for o in outcomes_list if o not in _GENERIC_OUTCOMES]
 
         question = market.get("question", "")
         series_format = ""
-        for tag in ("BO1", "BO3", "BO5", "Bo1", "Bo3", "Bo5", "bo1", "bo3", "bo5"):
+        for tag in ("BO1", "BO3", "BO5"):
             if tag.lower() in question.lower():
                 series_format = tag.upper()
                 break
@@ -185,22 +249,57 @@ class PolymarketScanner:
             game=game,
         )
 
-    def scan_all_esports(self) -> list[EsportsMarket]:
-        """Scan all esport categories and return enriched markets with order books."""
+    def _is_match_market(self, market: dict[str, Any]) -> bool:
+        """Check if a market is a head-to-head match (not a futures/prop bet)."""
+        outcomes = self._parse_json_field(market.get("outcomes"))
+        # Match markets have exactly 2 non-generic outcomes (team names)
+        if len(outcomes) != 2:
+            return False
+        return all(o not in _GENERIC_OUTCOMES for o in outcomes)
+
+    def scan_all_esports(self, games: list[str] | None = None) -> list[EsportsMarket]:
+        """Scan esports categories via tag_id and return enriched markets with order books.
+
+        Uses the Gamma API tag_id parameter which correctly returns esports events,
+        unlike the broken `tag` parameter which returns stale non-esports data.
+        """
+        if games is None:
+            games = DEFAULT_GAMES
+
         all_markets: list[EsportsMarket] = []
+        seen_conditions: set[str] = set()
 
-        for game, sport_id in GAMMA_SPORT_IDS.items():
-            logger.info("Scanning %s (sport_id=%d)…", game, sport_id)
-            events = self.get_events(sport_tag=game)
+        for game in games:
+            tag_id = GAME_TAG_IDS.get(game)
+            if not tag_id:
+                logger.warning("No tag_id configured for game '%s' — skipping", game)
+                continue
+
+            logger.info("Scanning %s (tag_id=%s)…", game, tag_id)
+            events = self.get_events_by_tag_id(tag_id)
+
             if not events:
-                events = self.get_events(sport_tag="esports")
+                logger.info("No events found for %s", game)
+                continue
 
+            match_event_count = 0
             for event in events:
                 markets = event.get("markets", [])
+                event_has_match = False
+
                 for mkt_data in markets:
+                    # Only process head-to-head match markets (skip futures, props, odd/even)
+                    if not self._is_match_market(mkt_data):
+                        continue
+
                     parsed = self._parse_market(event, mkt_data, game)
                     if parsed is None:
                         continue
+
+                    # Deduplicate
+                    if parsed.condition_id in seen_conditions:
+                        continue
+                    seen_conditions.add(parsed.condition_id)
 
                     # Fetch order books for each token
                     for outcome, token_id in parsed.token_ids.items():
@@ -213,6 +312,24 @@ class PolymarketScanner:
                             )
 
                     all_markets.append(parsed)
+                    event_has_match = True
 
-        logger.info("Discovered %d esports markets total", len(all_markets))
+                if event_has_match:
+                    match_event_count += 1
+
+            logger.info(
+                "%s: found %d events with %d tradeable match markets",
+                game,
+                match_event_count,
+                sum(1 for m in all_markets if m.game == game),
+            )
+
+        logger.info("Discovered %d esports match markets total", len(all_markets))
+
+        if not all_markets:
+            logger.info(
+                "No active esports match markets found — this is normal between "
+                "tournaments or during off-hours. Bot will check again next cycle."
+            )
+
         return all_markets
