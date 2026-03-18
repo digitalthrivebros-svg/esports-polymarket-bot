@@ -1,0 +1,8 @@
+py-clob-client
+hltv-async-api
+vlrdevapi
+requests
+aiohttp
+schedule
+python-dotenv
+pytest
